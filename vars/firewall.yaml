@@ -10,5 +10,5 @@ firewall_rules_global:
   - destination_port: 22
     comment: Ssh access from admin network
     protocol: tcp
-    source: 0.0.0.0/0
+    source: 129.177.0.0/16
     number: 00050
