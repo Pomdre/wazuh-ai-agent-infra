@@ -1,0 +1,91 @@
+---
+- name: Ensure firewalld is installed and running
+  ansible.builtin.package:
+    name: firewalld
+    state: present
+  tags:
+    - firewalld
+
+- name: Start and enable firewalld service
+  ansible.builtin.service:
+    name: firewalld
+    state: started
+    enabled: true
+  tags:
+    - firewalld
+
+- name: Allow traffic to loopback (lo)
+  ansible.posix.firewalld:
+    interface: lo
+    zone: trusted
+    permanent: true
+    state: enabled
+  tags:
+    - firewalld
+
+- name: Allow ICMP (ping) to the system
+  ansible.posix.firewalld:
+    zone: drop
+    state: enabled
+    permanent: true
+    icmp_block: "{{ item }}"
+  loop: "{{ icmp_types }}"
+  tags:
+    - firewalld
+
+- name: Get all rich rules
+  ansible.builtin.command: firewall-cmd --zone=public --list-rich-rules
+  register: rich_rules_output
+  tags:
+    - firewalld
+
+- name: Remove all rich rules dynamically it will not be effected before reload
+  ansible.posix.firewalld:
+    state: disabled
+    permanent: true
+    zone: public
+    rich_rule: "{{ item }}"
+  with_items: "{{ rich_rules_output.stdout_lines }}"
+  tags:
+    - firewalld
+
+- name: Apply global traffic control rules
+  ansible.posix.firewalld:
+    rich_rule: >
+      rule family="ipv4" port port="{{ item.destination_port }}" protocol="{{ item.protocol }}" source address="{{ item.source | trim }}" accept
+      {% if item.log | default(true) | bool %}
+      log prefix="{{ item.comment }}" level="info" limit value=10/s
+      {% endif %}
+    zone: public
+    permanent: true
+    state: enabled
+  loop: "{{ firewall_rules_global }}"
+  tags:
+    - firewalld
+
+- name: Apply host-specific traffic control rules (if defined)
+  ansible.posix.firewalld:
+    rich_rule: >
+      rule family="ipv4" port port="{{ item.destination_port }}" protocol="{{ item.protocol }}" source address="{{ item.source | trim }}" accept
+      {% if item.log | default(true) | bool %}
+      log prefix="{{ item.comment }}" level="info" limit value=10/s
+      {% endif %}
+    zone: public
+    permanent: true
+    state: enabled
+  loop: "{{ firewall_rules_host }}"
+  when: firewall_rules_host is defined
+  tags:
+    - firewalld
+
+- name: Reload firewalld to apply changes
+  ansible.builtin.service:
+    name: firewalld
+    state: reloaded
+  tags:
+    - firewalld
+
+- name: Force reload firewalld using firewall-cmd
+  ansible.builtin.command: sudo firewall-cmd --reload
+  tags:
+    - firewalld

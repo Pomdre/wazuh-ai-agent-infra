@@ -1,0 +1,10 @@
+---
+# Runs on AlmaLinux 9
+- name: Copy global bashrc
+  ansible.builtin.template:
+    src: bash/bashrc.j2
+    dest: /etc/bashrc
+    mode: "0644"
+    owner: root
+    group: root
+

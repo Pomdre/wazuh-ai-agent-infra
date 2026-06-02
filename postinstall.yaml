@@ -1,0 +1,106 @@
+---
+# Runs on AlmaLinux and FreeBSD
+- name: BaseOS installation
+  gather_facts: true
+  become: true
+  hosts: all
+  vars_files:
+    - vars/chrony.yaml
+    - vars/firewall.yaml
+
+  tasks:
+# AlmaLinux installation
+    - name: Motd
+      ansible.builtin.include_tasks: includes/almalinux/motd-update.yaml
+      tags:
+        - motd
+      when: ansible_distribution != 'FreeBSD'
+
+    - name: Firewalld
+      ansible.builtin.include_tasks: includes/almalinux/firewalld-manage.yaml
+      tags:
+        - firewalld
+      when: ansible_distribution != 'FreeBSD'
+
+    - name: Almabase
+      ansible.builtin.include_tasks: includes/almalinux/almabase-install.yaml
+      tags:
+        - almabase
+      when: ansible_distribution != 'FreeBSD'
+
+    - name: Chrony
+      ansible.builtin.include_tasks: includes/almalinux/chrony-install.yaml
+      tags:
+        - chrony
+      when: ansible_distribution != 'FreeBSD'
+
+    - name: Bash
+      ansible.builtin.include_tasks: includes/almalinux/bash-set.yaml
+      tags:
+        - bash
+      when: ansible_distribution != 'FreeBSD'
+
+    - name: Logrotate
+      ansible.builtin.include_tasks: includes/almalinux/logrotate-install.yaml
+      tags:
+        - logrotate
+      when: ansible_distribution != 'FreeBSD'
+
+    - name: Security
+      ansible.builtin.include_tasks: includes/almalinux/security.yaml
+      tags:
+        - security
+      when: ansible_distribution != 'FreeBSD'
+
+    - name: Motd - last
+      ansible.builtin.include_tasks: includes/almalinux/motd-update.yaml
+      tags:
+        - motd
+      when: ansible_distribution != 'FreeBSD'
+
+# Freebsd installation
+    - name: Install packages
+      ansible.builtin.include_tasks:
+        file: includes/freebsd/packages-install.yaml
+      tags:
+        - packages
+      when: ansible_distribution == 'FreeBSD'
+
+    - name: Firewall
+      ansible.builtin.include_tasks:
+        file: includes/freebsd/firewall-setup.yaml
+      tags:
+        - firewall
+      when: ansible_distribution == 'FreeBSD'
+
+    - name: Time
+      ansible.builtin.include_tasks:
+        file: includes/freebsd/time.yaml
+      tags:
+        - time
+      when: ansible_distribution == 'FreeBSD'
+
+    - name: Hostname
+      ansible.builtin.include_tasks:
+        file: includes/freebsd/hostname.yaml
+      tags:
+        - hostname
+      when: ansible_distribution == 'FreeBSD'
+
+    - name: Bash
+      ansible.builtin.include_tasks:
+        file: includes/freebsd/bash-set_FreeBSD.yaml
+      tags:
+        - bash
+      when: ansible_distribution == 'FreeBSD'
+
+    - name: Set permissions
+      ansible.builtin.include_tasks:
+        file: includes/freebsd/secure-stuff.yaml
+      when: ansible_distribution == 'FreeBSD'
+
+    - name: Remove default stuff
+      ansible.builtin.include_tasks:
+        file: includes/freebsd/remove-default-stuff.yaml
+      when: ansible_distribution == 'FreeBSD'
+

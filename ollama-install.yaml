@@ -1,0 +1,88 @@
+---
+# Installs Ollama
+
+- name: Install and configure Ollama
+  become: true
+  gather_facts: true
+  hosts:
+    - ollama_server
+
+  tasks:
+    - name: Ensure prerequisite packages are installed
+      ansible.builtin.dnf:
+        name:
+          - curl
+          - tar
+          - zstd
+        state: present
+
+    - name: Check whether Ollama is already installed
+      ansible.builtin.command: ollama --version
+      register: ollama_version
+      changed_when: false
+      failed_when: false
+
+    - name: Download the Ollama install script
+      ansible.builtin.get_url:
+        url: https://ollama.com/install.sh
+        dest: /tmp/ollama-install.sh
+        mode: '0755'
+      when: ollama_version.rc != 0
+
+    - name: Run the Ollama install script
+      ansible.builtin.command: /tmp/ollama-install.sh
+      when: ollama_version.rc != 0
+      changed_when: true
+
+    - name: Ensure the Ollama systemd override directory exists
+      ansible.builtin.file:
+        path: /etc/systemd/system/ollama.service.d
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Configure Ollama to listen on the network
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/ollama.service.d/override.conf
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Service]
+          Environment="OLLAMA_HOST={{ ollama_listen_address | default('0.0.0.0') }}:{{ ollama_port | default(11434) }}"
+      notify: Restart ollama
+
+    - name: Enable and start Ollama
+      ansible.builtin.systemd:
+        name: ollama
+        state: started
+        enabled: true
+        daemon_reload: true
+
+    - name: Flush handlers so Ollama is listening before we pull models
+      ansible.builtin.meta: flush_handlers
+
+    - name: Wait for the Ollama API to be reachable
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ ollama_port | default(11434) }}/api/tags"
+        status_code: 200
+      register: ollama_api
+      retries: 30
+      delay: 2
+      until: ollama_api.status == 200
+
+    - name: Pull the configured models
+      ansible.builtin.command: "ollama pull {{ item }}"
+      environment:
+        OLLAMA_HOST: "127.0.0.1:{{ ollama_port | default(11434) }}"
+      loop: "{{ ollama_models | default(['llama3']) }}"
+      register: ollama_pull
+      changed_when: "'success' in ollama_pull.stdout or 'pulling' in ollama_pull.stdout"
+
+  handlers:
+    - name: Restart ollama
+      ansible.builtin.systemd:
+        name: ollama
+        state: restarted
+        daemon_reload: true

@@ -1,0 +1,9 @@
+[wazuh_server]
+s-security
+
+[wazuh_agent]
+c-almalinux
+c-freebsd
+
+[ollama_server]
+s-ollama

@@ -1,0 +1,81 @@
+# This will install wazuh agent on freebsd
+- name: Installing and configuring wazuh agent for FreeBSD and Almalinux
+  become: true
+  gather_facts: true
+  hosts:
+    - wazuh_agent
+  vars_files:
+    - vault_{{ vault_env }}.yaml
+  tasks:
+    - name: Install wazuh agent [FreeBSD]
+      ansible.builtin.pkgng:
+        name: wazuh-agent
+        state: present
+      when: ansible_distribution == "FreeBSD"
+
+    - name: Set agent server address [FreeBSD]
+      ansible.builtin.replace:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '<address>.*</address>'
+        replace: '<address>158.39.77.195</address>'
+      when: ansible_distribution == "FreeBSD"
+
+    - name: Set agent protocol tcp [FreeBSD]
+      ansible.builtin.replace:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '<protocol>.*</protocol>'
+        replace: '<protocol>tcp</protocol>'
+      when: ansible_distribution == "FreeBSD"
+
+    - name: Ensure auth block is present in ossec_config [FreeBSD]
+      ansible.builtin.blockinfile:
+        path: /var/ossec/etc/ossec.conf
+        insertbefore: '</ossec_config>'
+        marker: "<!-- {mark} ANSIBLE MANAGED BLOCK auth -->"
+        block: |
+          <auth>
+            <disabled>no</disabled>
+            <port>1515</port>
+            <use_source_ip>no</use_source_ip>
+            <purge>yes</purge>
+            <use_password>yes</use_password>
+          </auth>
+      when: ansible_distribution == "FreeBSD"
+
+    - name: Set enrollment password [FreeBSD]
+      ansible.builtin.copy:
+        content: "{{ vault_wazuh_authd_pass }}"
+        dest: /var/ossec/etc/authd.pass
+        owner: root
+        group: wazuh
+        mode: '0640'
+      when: ansible_distribution == "FreeBSD"
+
+    - name: Start service wazuh-agent, if not started [FreeBSD]
+      ansible.builtin.service:
+        name: wazuh-agent
+        state: restarted
+        enabled: true
+      when: ansible_distribution == "FreeBSD"
+
+# Install wazuh agent on almalinux
+    - name: Install and configure wazuh agent [AlmaLinux]
+      ansible.builtin.include_role:
+        name: ansible-wazuh-agent
+      vars:
+        wazuh_managers:
+          - address: 158.39.77.195
+            port: 1514
+            protocol: tcp
+            api_port: 55000
+            api_proto: https
+            api_user: ansible
+            max_retries: 5
+            retry_interval: 5
+        wazuh_agent_authd:
+          enable: true
+          port: 1515
+          ssl_agent_ca: null
+          ssl_auto_negotiate: 'no'
+        authd_pass: "{{ vault_wazuh_authd_pass }}"
+      when: ansible_distribution == "AlmaLinux"

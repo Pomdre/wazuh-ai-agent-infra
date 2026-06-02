@@ -1,0 +1,40 @@
+---
+# This task defines the hostname in /etc/rc.conf.d/hostname
+# It also sets the hostname in /etc/rc.conf to ensure consitency
+- name: Set a hostname
+  ansible.builtin.hostname:
+    name: "{{ hostname }}"
+  tags: hostname
+
+  tasks:
+    - name: Ensure /etc/rc.conf.d directory exists
+      ansible.builtin.file:
+        path: /etc/rc.conf.d
+        state: directory
+        mode: '0755'
+      tags: hostname
+
+    - name: Set hostname in /etc/rc.conf
+      ansible.builtin.lineinfile:
+        path: /etc/rc.conf
+        regexp: '^hostname='
+        line: 'hostname="{{ hostname }}"'
+      notify:
+        - Set hostname for running system (temp)
+      tags: hostname
+
+    - name: Set hostname in /etc/rc.conf.d/hostname (Override)
+      ansible.builtin.copy:
+        dest: /etc/rc.conf.d/hostname
+        content: 'hostname="{{ hostname }}"'
+        owner: root
+        group: wheel
+        mode: '0644'
+      notify:
+        - Set hostname for running system (temp)
+      tags: hostname
+
+  handlers:
+    - name: Set hostname for running system (temp)
+      ansible.builtin.command: "hostname {{ hostname }}"
+      tags: hostname

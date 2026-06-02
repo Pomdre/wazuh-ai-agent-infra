@@ -1,0 +1,36 @@
+---
+- name: Set the timezone to Europe/Oslo
+  tags: time
+  file:
+    src: "/usr/share/zoneinfo/Europe/Oslo"
+    dest: "/etc/localtime"
+    state: link
+    force: true
+
+- name: Ensure timezone is set in rc.conf [You need to Reboot if changed]
+  tags: time
+  lineinfile:
+    path: /etc/rc.conf
+    line: 'timezone="Europe/Oslo"'
+    create: true
+
+- name: Install chrony
+  tags: time
+  ansible.builtin.pkgng:
+    name: chrony
+    state: present
+
+- name: Configure chrony to use ntp.uib.no
+  tags: time
+  lineinfile:
+    path: /usr/local/etc/chrony.conf
+    regexp: '^! server'
+    line: "server {{ chrony_ntpserver }} iburst"
+    state: present
+
+- name: Be sure chrony is running and enabled
+  tags: time
+  ansible.builtin.service:
+    name: chronyd
+    state: restarted
+    enabled: true

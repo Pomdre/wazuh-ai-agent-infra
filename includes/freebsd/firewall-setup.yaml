@@ -1,0 +1,89 @@
+---
+- name: Enable IPFW in rc.conf [You need to Reboot if changed]
+  ansible.builtin.lineinfile:
+    path: /etc/rc.conf
+    regexp: '^firewall_enable='
+    line: 'firewall_enable="YES"'
+    create: true
+  tags:
+    - firewall
+
+- name: Enable IPFW logging in rc.conf [You need to Reboot if changed]
+  ansible.builtin.lineinfile:
+    path: /etc/rc.conf
+    regexp: '^firewall_logging='
+    line: 'firewall_logging="YES"'
+    create: true
+  tags:
+    - firewall
+
+- name: Enable IPFW type in rc.conf [You need to Reboot if changed]
+  ansible.builtin.lineinfile:
+    path: /etc/rc.conf
+    regexp: '^firewall_type='
+    line: 'firewall_type="closed"'
+    create: true
+  tags:
+    - firewall
+
+- name: Create IPFW rules file
+  ansible.builtin.copy:
+    dest: /etc/ipfw.rules
+    content: |
+      #!/bin/sh
+      /sbin/ipfw -q -f flush       # Delete all rules
+      # Add check line
+      /sbin/ipfw -q add check-state
+
+      # Base rules
+      /sbin/ipfw -q add 00005 deny ip from "table(1)" to me
+      /sbin/ipfw -q add 00010 allow all from any to any via {{ firewall_intdev }}
+      /sbin/ipfw -q add 00011 allow ip from any to any via lo0
+      /sbin/ipfw -q add 00012 allow ip from any to any established
+      /sbin/ipfw -q add 00020 allow all from any to any out via {{ firewall_extdev }} keep-state
+
+      # Allow rules global
+      {% for rule in firewall_rules_global %}
+      /sbin/ipfw -q add {{ rule.number }} allow ip from {{ rule.source }} to me {{ rule.destination_port }}
+      {% endfor %}
+
+      # Allow rules per host
+      {% if firewall_rules_host is defined %}
+      {% for rule in firewall_rules_host %}
+      /sbin/ipfw -q add {{ rule.number }} allow ip from {{ rule.source }} to me {{ rule.destination_port }}
+      {% endfor %}
+      {% endif %}
+
+      # Block all and log
+      /sbin/ipfw -q add 25000 deny log ip from any to any
+  tags:
+    - firewall
+
+- name: Make IPFW rules file executable
+  ansible.builtin.file:
+    path: /etc/ipfw.rules
+    mode: '0755'
+  tags:
+    - firewall
+
+- name: Add firewall script to rc.conf [You need to Reboot if changed]
+  ansible.builtin.lineinfile:
+    path: /etc/rc.conf
+    regexp: '^firewall_script='
+    line: 'firewall_script="/etc/ipfw.rules"'
+    create: true
+  tags:
+    - firewall
+
+- name: Apply firewall rules
+  ansible.builtin.command: /etc/ipfw.rules
+  tags:
+    - firewall
+
+- name: Ensure ipfw service is started
+  ansible.builtin.service:
+    name: ipfw
+    state: started
+    enabled: true
+  tags:
+    - firewall

@@ -1,0 +1,18 @@
+---
+ansible_host: 158.37.66.197
+ansible_user: almalinux
+hostname: s-ollama
+vault_env: staging
+
+# ollama
+ollama_listen_address: "0.0.0.0"
+ollama_port: 11434
+ollama_models:
+  - llama3
+
+# firewall
+firewall_rules_host:
+  - destination_port: 11434
+    comment: Ollama API access from Wazuh server
+    protocol: tcp
+    source: 158.39.77.195/32

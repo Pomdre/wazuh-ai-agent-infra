@@ -1,0 +1,14 @@
+---
+# Global firewall rules for FreeBSD servers
+icmp_types:
+  - "echo-reply"
+  - "echo-request"
+
+# Firewall rules in FreeBSD must have a number
+# We are currently using 00050-00060 for rules that apply to all hosts
+firewall_rules_global:
+  - destination_port: 22
+    comment: Ssh access from admin network
+    protocol: tcp
+    source: 0.0.0.0/0
+    number: 00050

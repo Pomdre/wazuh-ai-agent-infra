@@ -1,0 +1,140 @@
+---
+# Installs a single-node Wazuh stack (indexer + manager + filebeat + dashboard)
+# on the wazuh_server host using the official wazuh-ansible roles.
+# The roles are pulled from https://github.com/wazuh/wazuh-ansible and
+# resolved via roles_path in ansible.cfg.
+
+- name: Install Wazuh server
+  become: true
+  gather_facts: true
+  hosts:
+    - wazuh_server
+  vars_files:
+    - vault_{{ vault_env }}.yaml
+
+  vars:
+    wazuh_server_ip: "{{ ansible_default_ipv4.address }}"
+    wazuh_server_hostname: "{{ hostname }}.local"
+
+    # Wazuh-indexer
+    indexer_node_name: node-1
+    indexer_network_host: "0.0.0.0"
+    indexer_cluster_nodes:
+      - "{{ wazuh_server_ip }}"
+    indexer_discovery_nodes:
+      - "{{ wazuh_server_ip }}"
+    indexer_node_master: true
+    indexer_http_port: 9200
+    indexer_transport_port: 9300
+
+    instances:
+      node1:
+        name: node-1
+        ip: "{{ wazuh_server_hostname }}"
+        role: indexer
+      manager:
+        name: wazuh-manager
+        ip: "{{ wazuh_server_hostname }}"
+        role: server
+      dashboard:
+        name: dashboard
+        ip: "{{ wazuh_server_hostname }}"
+        role: dashboard
+
+    # Wazuh-manager
+    wazuh_manager_authd:
+      enable: true
+      port: 1515
+      use_source_ip: 'no'
+      force:
+        enabled: 'yes'
+        key_mismatch: 'yes'
+        disconnected_time: '1h'
+        after_registration_time: '1h'
+      purge: 'yes'
+      use_password: 'yes'
+      ciphers: 'HIGH:!ADH:!EXP:!MD5:!RC4:!3DES:!CAMELLIA:@STRENGTH'
+      ssl_agent_ca: null
+      ssl_verify_host: 'no'
+      ssl_manager_cert: null
+      ssl_manager_key: null
+      ssl_auto_negotiate: 'no'
+    authd_pass: "{{ vault_wazuh_authd_pass }}"
+
+    wazuh_manager_config:
+      connection:
+        - type: 'secure'
+          port: '1514'
+          protocol: 'tcp'
+          queue_size: 131072
+
+    # Filebeat
+    filebeat_node_name: node-1
+    wazuh_manager_ip_filebeat: "{{ wazuh_server_ip }}"
+    filebeat_output_indexer_hosts:
+      - "{{ wazuh_server_hostname }}"
+
+    # Wazuh-manager indexer
+    wazuh_manager_indexer:
+      enabled: 'yes'
+      hosts:
+        - "{{ wazuh_server_hostname }}"
+
+    # Wazuh-dashboard
+    dashboard_node_name: dashboard
+    dashboard_conf:
+      server:
+        host: "0.0.0.0"
+        port: 443
+
+  pre_tasks:
+    - name: Ensure hostname resolves to the server IP in /etc/hosts
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: '^\S+\s+{{ wazuh_server_hostname }}(\s|$)'
+        line: "{{ wazuh_server_ip }} {{ wazuh_server_hostname }}"
+        state: present
+        owner: root
+        group: root
+        mode: '0644'
+
+  # Due to the vm having a small root volume we need to move the ossec var folder to a seperated volume disk.
+  # Importent to change the disk letter if ther is more disks attached to the vm
+    - name: Create xfs filesystem on /dev/sdb
+      community.general.filesystem:
+        fstype: xfs
+        dev: /dev/sdb
+
+    - name: Get UUID of /dev/sdb
+      ansible.builtin.command: blkid -s UUID -o value /dev/sdb
+      register: sdb_uuid
+      changed_when: false
+
+    - name: Ensure /mnt/ossec mount point exists
+      ansible.builtin.file:
+        path: /mnt/ossec
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Mount /dev/sdb at /mnt/ossec by UUID and persist in /etc/fstab
+      ansible.posix.mount:
+        path: /mnt/ossec
+        src: "UUID={{ sdb_uuid.stdout }}"
+        fstype: xfs
+        opts: defaults,nofail
+        state: mounted
+
+    - name: Symlink /var/ossec to /mnt/ossec
+      ansible.builtin.file:
+        src: /mnt/ossec
+        dest: /var/ossec
+        state: link
+
+  roles:
+    - role: wazuh-indexer
+      perform_installation: true
+    - role: ansible-wazuh-manager
+    - role: ansible-filebeat-oss
+    - role: wazuh-dashboard

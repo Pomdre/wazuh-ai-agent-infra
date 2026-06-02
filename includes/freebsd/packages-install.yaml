@@ -1,0 +1,48 @@
+---
+- name: Install basic things
+  community.general.pkgng:
+    name: "{{ item }}"
+    state: present
+    autoremove : true
+    ignore_osver: true
+  loop:
+    - sudo
+    - pkg
+    - tmux
+    - screen
+    - bind-tools
+    - curl
+    - wget
+    - pkgconf
+    - vim
+    - sssd2
+    - duf
+    - base64
+    - git
+    - htop
+    - rsync
+    - readline
+    - gdb
+    - autoconf
+    - automake
+    - bash
+    - bison
+    - gmake
+    - sqlite3
+    - libcbor
+    - libcjson
+    - libedit
+    - libffi
+    - libffi321
+    - libfido2
+    - libiconv
+    - libinotify
+    - liblz4
+    - libnghttp2
+    - libtextstyle
+    - cvsps
+    - cyrus-sasl
+    - ca_root_nss
+    - ldns
+    - zstd
+  tags: packages

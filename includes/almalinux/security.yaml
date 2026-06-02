@@ -1,0 +1,95 @@
+---
+# Runs on AlmaLinux 9
+- name: Update the grub2 configuration with audit=1
+  command: "grubby --update-kernel=ALL --args='audit=1'"
+  tags: security
+
+- name: Add audit_backlog_limit to GRUB_CMDLINE_LINUX
+  command: "grubby --update-kernel=ALL --args='audit_backlog_limit=8192'"
+  tags: security
+
+- name: Set max_log_file_action to keep_logs in /etc/audit/auditd.conf
+  lineinfile:
+    path: /etc/audit/auditd.conf
+    regexp: '^max_log_file_action'
+    line: 'max_log_file_action = keep_logs'
+    state: present
+  tags: security
+
+- name: Ensure /etc/systemd/journald.conf exists with [Journal] and Storage=persistent
+  blockinfile:
+    path: /etc/systemd/journald.conf
+    create: yes
+    block: |
+      [Journal]
+      Storage=persistent
+  tags: security
+
+- name: Ensure Compress=yes in /etc/systemd/journald.conf
+  lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: '^Compress='
+    line: 'Compress=yes'
+    state: present
+  tags: security
+
+- name: Restart systemd-journald service
+  systemd:
+    name: systemd-journald
+    state: restarted
+  tags: security
+
+- name: Disable systemd-journal-remote.socket if installed
+  systemd:
+    name: systemd-journal-remote.socket
+    masked: true
+    state: stopped
+  tags: security
+  ignore_errors: true
+
+- name: Set Defaults logfile in /etc/sudoers
+  lineinfile:
+    path: /etc/sudoers
+    regexp: '^Defaults\s+logfile='
+    line: 'Defaults logfile="/var/log/sudo.log"'
+    validate: '/usr/sbin/visudo -cf %s'
+    state: present
+  tags: security
+
+- name: Ensure PermitRootLogin no in /etc/ssh/sshd_config
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^PermitRootLogin'
+    line: 'PermitRootLogin no'
+    state: present
+  tags: security
+
+- name: Comment out any PermitRootLogin entries not set to no in /etc/ssh/sshd_config
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^(?!#).*PermitRootLogin\s+(?!no\b)'
+    line: '# \g<0>'
+    state: present
+  tags: security
+
+- name: Comment out any PermitRootLogin entries not set to no in /etc/ssh/sshd_config.d/*.conf
+  find:
+    paths: /etc/ssh/sshd_config.d
+    patterns: '*.conf'
+  register: sshd_config_files
+  tags: security
+
+- name: Comment out any PermitRootLogin entries not set to no in found sshd_config.d files
+  lineinfile:
+    path: "{{ item.path }}"
+    regexp: '^(?!#).*PermitRootLogin\s+(?!no\b)'
+    line: '# \g<0>'
+    state: present
+  loop: "{{ sshd_config_files.files }}"
+  tags: security
+
+- name: Restart sshd
+  systemd:
+    name: sshd
+    state: restarted
+  tags: security

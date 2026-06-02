@@ -1,0 +1,28 @@
+---
+# Runs on AlmaLinux 9
+- name: Install logrotate
+  ansible.builtin.dnf:
+    name: logrotate
+    state: present
+  tags:
+    - logrotate
+
+- name: Copy logrotate main config
+  ansible.builtin.template:
+    src: logrotate/logrotate.conf.j2
+    dest: /etc/logrotate.conf
+    mode: '0644'
+    owner: root
+    group: root
+  tags:
+    - logrotate
+
+- name: Copy logrotate config folder
+  ansible.builtin.copy:
+    src: logrotate/logrotate.d
+    dest: /etc/logrotate.d
+    mode: '0644'
+    owner: root
+    group: root
+  tags:
+    - logrotate

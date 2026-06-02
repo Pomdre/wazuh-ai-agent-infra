@@ -1,0 +1,81 @@
+---
+# Runs on AlmaLinux 9
+- name: Update all packages
+  ansible.builtin.dnf:
+    name: "*"
+    state: latest
+    update_only: true
+  tags:
+    - almabase
+
+- name: Remove init dialog
+  ansible.builtin.dnf:
+    name:
+      - gnome-initial-setup
+      - initial-setup
+      - initial-setup-gui
+    state: absent
+  tags:
+    - almabase
+
+- name: Install epel-release
+  ansible.builtin.dnf:
+    name:
+      - epel-release
+    state: present
+  tags:
+    - almabase
+
+- name: Install standard pkgs
+  ansible.builtin.dnf:
+    name:
+      - bind-utils
+      - git
+      - rsync
+      - tmux
+      - htop
+      - wget
+      - ncdu
+      - vim
+      - nc
+      - yum-utils
+      - bat
+    state: present
+  tags:
+    - almabase
+
+- name: Remove telnet
+  ansible.builtin.dnf:
+    name: telnet
+    state: absent
+  tags:
+    - almabase
+
+- name: Disable sssd service
+  systemd:
+    name: sssd
+    enabled: false
+    state: stopped
+  tags:
+    - almabase
+
+- name: Set timezone to Europe/Oslo
+  community.general.timezone:
+    name: "Europe/Oslo"
+  tags:
+    - almabase
+
+- name: Set a hostname
+  ansible.builtin.hostname:
+    name: "{{ hostname }}"
+  tags:
+    - almabase
+    - hostname
+
+- name: Enable SELinux
+  ansible.posix.selinux:
+    policy: targeted
+    state: enforcing
+  tags:
+    - almabase
+    - selinux

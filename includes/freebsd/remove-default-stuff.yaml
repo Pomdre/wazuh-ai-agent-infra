@@ -1,0 +1,32 @@
+---
+- name: Remove users from /etc/passwd
+  ansible.builtin.user:
+    name: '{{ item }}'
+    state: absent
+  loop:
+    - toor
+    - games
+    - news
+    - bind
+    - _dhcp
+    - uucp
+    - _ypldap
+    - www
+    - pop
+    - hast
+    - cyrus
+    - git_daemon
+
+
+- name: Remove groups from /etc/group
+  group:
+    name: '{{ item }}'
+    state: absent
+  loop:
+    - news
+    - games
+    - ftp
+    - _dhcp
+    - _ypldap
+    - cyrus
+    - git_daemon

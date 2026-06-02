@@ -1,0 +1,9 @@
+---
+# Pull the official Wazuh Ansible repository.
+# Installs to ./roles/wazuh-ansible — actual roles live in
+# roles/wazuh-ansible/roles/wazuh/ (see roles_path in ansible.cfg).
+roles:
+  - name: wazuh-ansible
+    src: https://github.com/wazuh/wazuh-ansible.git
+    scm: git
+    version: v4.14.5

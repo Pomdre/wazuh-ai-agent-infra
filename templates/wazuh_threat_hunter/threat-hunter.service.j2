@@ -1,0 +1,17 @@
+# {{ ansible_managed }}
+[Unit]
+Description=Wazuh AI Threat Hunter
+After=network-online.target wazuh-manager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ threat_hunter_venv }}/bin/python {{ threat_hunter_script }}
+Restart=on-failure
+RestartSec=10
+# Embedding models are cached under HOME on first run.
+Environment=HOME={{ threat_hunter_home }}
+WorkingDirectory={{ threat_hunter_home }}
+
+[Install]
+WantedBy=multi-user.target

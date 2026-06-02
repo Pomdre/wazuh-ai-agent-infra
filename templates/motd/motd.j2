@@ -1,0 +1,18 @@
+---
+Welcome to host {{ ansible_hostname }}!
+
+ * This is a managed system of University of Langtvekkistan.
+ * Please report any issues to admin@uol.lv
+
+ * This system is managed by Ansible!
+ * Motd updated at: {{ '%Y-%m-%d %H:%M:%S' | strftime(ansible_date_time.epoch) }}
+
+ * Installed operating system: {{ hostvars[inventory_hostname].ansible_distribution }} {{ hostvars[inventory_hostname].ansible_distribution_version }}
+{% set desired_line = os_release_content.splitlines() | select('search', 'SUPPORT_END=') | first %}
+{% if desired_line %}
+ * The support end date is: {{ desired_line.split('=')[1] }}
+{% else %}
+ * The support end date is: Please check the os_release file for SUPPORT_END.
+{% endif %}
+
+ ---

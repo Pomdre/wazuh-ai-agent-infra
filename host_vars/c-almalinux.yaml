@@ -1,0 +1,5 @@
+---
+ansible_host: 158.39.201.226
+ansible_user: almalinux
+hostname: c-almalinux
+vault_env: staging

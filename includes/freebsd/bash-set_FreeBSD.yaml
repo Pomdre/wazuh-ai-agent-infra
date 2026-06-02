@@ -1,0 +1,10 @@
+---
+# Runs on FreeBSD
+- name: Copy global bash profile
+  ansible.builtin.template:
+    src: templates/bash/profile_production.j2
+    dest: /usr/local/etc/profile
+    mode: "0644"
+    owner: root
+    group: wheel
+  tags: bash

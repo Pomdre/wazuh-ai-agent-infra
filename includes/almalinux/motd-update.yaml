@@ -1,0 +1,39 @@
+---
+# Runs on AlmaLinux 9
+- name: Read /etc/os-release
+  ansible.builtin.slurp:
+    src: /etc/os-release
+  register: os_release_file
+  tags:
+    - motd
+
+- name: Decode os-release content and set as a fact
+  ansible.builtin.set_fact:
+    os_release_content: "{{ os_release_file['content'] | b64decode }}"
+  tags:
+    - motd
+
+- name: Upload MOTD file
+  ansible.builtin.template:
+    src: motd/motd.j2
+    dest: /etc/motd
+    mode: "0644"
+    owner: root
+  tags:
+    - motd
+
+- name: Change sshd motd
+  ansible.builtin.lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: "#PrintMotd yes"
+    line: "PrintMotd no"
+  tags:
+    - motd
+
+- name: Restart sshd
+  ansible.builtin.systemd:
+    name: sshd
+    state: restarted
+    enabled: true
+  tags:
+    - motd

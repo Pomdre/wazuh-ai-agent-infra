@@ -1,0 +1,27 @@
+---
+ansible_host: 158.39.77.195
+ansible_user: almalinux
+hostname: s-security
+vault_env: staging
+
+# firewall
+firewall_rules_host:
+  - destination_port: 443
+    comment: Https access from admin network
+    protocol: tcp
+    source:  0.0.0.0/0
+
+  - destination_port: 1514
+    comment: Wazuh agent port
+    protocol: tcp
+    source: 0.0.0.0/0
+
+  - destination_port: 1515
+    comment: Wazuh agent port for enrollment via automatic agent request
+    protocol: tcp
+    source: 0.0.0.0/0
+
+  - destination_port: 8000
+    comment: Wazuh AI threat-hunter chat UI
+    protocol: tcp
+    source: 0.0.0.0/0

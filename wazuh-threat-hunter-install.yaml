@@ -1,0 +1,139 @@
+---
+# Installs the Wazuh AI threat-hunter integration on the Wazuh server.
+- name: Install Wazuh AI threat-hunter integration
+  become: true
+  gather_facts: true
+  hosts:
+    - wazuh_server
+  vars_files:
+    - vault_{{ vault_env }}.yaml
+
+  vars:
+    ollama_api_url: "http://{{ hostvars['s-ollama'].ansible_host }}:{{ hostvars['s-ollama'].ollama_port | default(11434) }}"
+    threat_hunter_model: llama3
+    threat_hunter_embedding_model: "sentence-transformers/all-MiniLM-L6-v2"
+
+    threat_hunter_home: /mnt/ossec/threat-hunter
+    threat_hunter_venv: /mnt/ossec/threat-hunter/venv
+    threat_hunter_script: /var/ossec/integrations/threat_hunter.py
+    threat_hunter_archives_dir: /var/ossec/logs/archives
+    threat_hunter_log_file: /var/ossec/logs/threat_hunter.log
+
+    threat_hunter_default_days: 7
+    # Log chunks fed to the model per question (default retriever value is 4).
+    # Higher = the model sees more of the logs, at the cost of a bigger prompt.
+    threat_hunter_retrieval_k: 20
+    threat_hunter_listen_host: "0.0.0.0"
+    threat_hunter_listen_port: 8000
+
+    # Basic-auth credentials for the chat UI.
+    threat_hunter_user: "admin"
+    threat_hunter_password: "{{ vault_threat_hunter_password | default('changeme') }}"
+
+    threat_hunter_pip_packages:
+      - paramiko
+      - python-daemon
+      - langchain
+      - langchain-community
+      - langchain-ollama
+      - langchain-huggingface
+      - faiss-cpu
+      - sentence-transformers
+      - transformers
+      - pytz
+      - hf_xet
+      - fastapi
+      - uvicorn[standard]
+
+  tasks:
+    - name: Install Python and build prerequisites
+      ansible.builtin.dnf:
+        name:
+          - python3
+          - python3-pip
+          - python3-devel
+          - gcc
+          - gcc-c++
+        state: present
+
+    - name: Create the threat-hunter directories on /mnt/ossec
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0750'
+      loop:
+        - "{{ threat_hunter_home }}"
+        - "{{ threat_hunter_home }}/tmp"
+        - "{{ threat_hunter_home }}/pip-cache"
+
+    - name: Create the Python virtualenv and install dependencies
+      ansible.builtin.pip:
+        name: "{{ threat_hunter_pip_packages }}"
+        virtualenv: "{{ threat_hunter_venv }}"
+        virtualenv_command: python3 -m venv
+      environment:
+        TMPDIR: "{{ threat_hunter_home }}/tmp"
+        PIP_CACHE_DIR: "{{ threat_hunter_home }}/pip-cache"
+      async: 1800
+      poll: 30
+
+    - name: Ensure the Wazuh integrations directory exists
+      ansible.builtin.file:
+        path: "{{ threat_hunter_script | dirname }}"
+        state: directory
+        owner: root
+        group: wazuh
+        mode: '0750'
+
+    - name: Enable JSON archives in ossec.conf
+      ansible.builtin.replace:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '<logall_json>\s*no\s*</logall_json>'
+        replace: '<logall_json>yes</logall_json>'
+      notify: Restart wazuh-manager
+
+    - name: Enable plain archives in ossec.conf
+      ansible.builtin.replace:
+        path: /var/ossec/etc/ossec.conf
+        regexp: '<logall>\s*no\s*</logall>'
+        replace: '<logall>yes</logall>'
+      notify: Restart wazuh-manager
+
+    - name: Deploy the threat-hunter script
+      ansible.builtin.template:
+        src: templates/wazuh_threat_hunter/threat-hunter.py.j2
+        dest: "{{ threat_hunter_script }}"
+        owner: root
+        group: wazuh
+        mode: '0750'
+      notify: Restart threat-hunter
+
+    - name: Deploy the threat-hunter systemd unit
+      ansible.builtin.template:
+        src: templates/wazuh_threat_hunter/threat-hunter.service.j2
+        dest: /etc/systemd/system/threat-hunter.service
+        owner: root
+        group: root
+        mode: '0644'
+      notify: Restart threat-hunter
+
+    - name: Enable and start the threat-hunter service
+      ansible.builtin.systemd:
+        name: threat-hunter
+        state: started
+        enabled: true
+        daemon_reload: true
+
+  handlers:
+    - name: Restart wazuh-manager
+      ansible.builtin.service:
+        name: wazuh-manager
+        state: restarted
+
+    - name: Restart threat-hunter
+      ansible.builtin.systemd:
+        name: threat-hunter
+        state: restarted
+        daemon_reload: true

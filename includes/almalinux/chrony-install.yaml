@@ -1,0 +1,32 @@
+---
+# Runs on AlmaLinux 9
+- name: Install chrony
+  ansible.builtin.dnf:
+    name: chrony
+    state: present
+  tags: chrony
+
+- name: Copy chrony config to server
+  ansible.builtin.template:
+    src: chrony/chrony.conf.j2
+    dest: /etc/chrony.conf
+    owner: root
+    group: root
+    mode: '0644'
+    force: true
+  tags: chrony
+
+- name: Ensure OPTIONS include '-u chrony' in /etc/sysconfig/chronyd
+  lineinfile:
+    path: /etc/sysconfig/chronyd
+    regexp: '^OPTIONS='
+    line: 'OPTIONS="-u chrony"'
+    state: present
+  tags: chrony
+
+- name: Be sure chrony is running and enabled
+  ansible.builtin.service:
+    name: chronyd
+    state: restarted
+    enabled: true
+  tags: chrony

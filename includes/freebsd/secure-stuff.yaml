@@ -1,0 +1,89 @@
+---
+- name: Correct permissions on configs
+  ansible.builtin.file:
+    name: '{{ item }}'
+    mode: '0640'
+  loop:
+    - /etc/sysctl.conf
+    - /etc/ttys
+    - /etc/inetd.conf
+    - /etc/login.access
+    - /etc/login.conf
+    - /etc/login.conf.db
+    - /etc/rc.conf
+    - /etc/ftpusers
+    - /etc/group
+    - /etc/hosts.equiv
+    - /etc/inetd.conf
+
+- name: Correct permissions on executables
+  ansible.builtin.file:
+    name: '{{ item }}'
+    mode: '0550'
+  loop:
+    - /usr/bin/users
+    - /usr/bin/who
+    - /usr/bin/lastcomm
+    - /usr/sbin/lastlogin
+    - /usr/bin/last
+
+- name: Additions to rc.conf
+  ansible.builtin.blockinfile:
+    dest: /etc/rc.conf
+    block: |
+      nfs_client_enable="YES"
+      nfs_client_flags="-n 4"
+      nfsuserd_enable="YES"
+      nfsuserd_flags="-usermax 1000 -manage-gids -domain {{ id_map_domain }}"
+      nfscbd_enable="YES"
+      rpc_lockd_enable="YES"
+      rpc_statd_enable="YES"
+      inetd_enable="NO"
+      clear_tmp_enable="YES"
+      syslogd_flags="-ss"
+      icmp_drop_redirect="YES"
+      icmp_log_redirect="YES"
+      sendmail_enable="NONE"
+      fail2ban_enable="YES"
+
+- name: Additions to sysctl.conf
+  blockinfile:
+    dest: /etc/sysctl.conf
+    block: |
+      security.bsd.see_other_uids=0
+      security.bsd.unprivileged_read_msgbuf=0
+      security.bsd.unprivileged_proc_debug=0
+      kernel.dmesg_restrict = 1
+      security.bsd.see_other_uids=0
+      net.inet.tcp.blackhole=2
+      net.inet.udp.blackhole=1
+      net.inet.ip.random_id=1
+
+- name: Additions to loader.conf
+  blockinfile:
+    dest: /boot/loader.conf
+    block: |
+      kern.geom.label.disk_ident.enable="0"
+      kern.geom.label.gptid.enable="0"
+      opensolaris_load="YES"
+      zfs_load="YES"
+
+- name: Add command alias chown to sudo
+  lineinfile:
+    dest: /usr/local/etc/sudoers
+    line: "Cmnd_Alias         CHOWN = /usr/sbin/chown"
+
+- name: Add sudo nesadmin
+  lineinfile:
+    dest: /usr/local/etc/sudoers
+    line: "nesadmin ALL= NOPASSWD: CHOWN"
+
+- name: Add command alias su to sudo
+  lineinfile:
+    dest: /usr/local/etc/sudoers
+    line: "Cmnd_Alias         SUNONROOT = /usr/bin/su - u* , !/usr/bin/su - [A-Ta-t|V-Zv-z]*"
+
+- name: Add sudo nesadmin
+  lineinfile:
+    dest: /usr/local/etc/sudoers
+    line: "nesadmin ALL= NOPASSWD: SUNONROOT"

@@ -1,0 +1,558 @@
+#!/usr/bin/env python3
+# {{ ansible_managed }}
+#
+# Wazuh AI threat-hunter integration.
+#
+# This service runs ON the Wazuh server and reads the local Wazuh archives, but
+# it talks to an Ollama instance running on a SEPARATE server via OLLAMA_BASE_URL.
+# It builds a FAISS vector store from recent archive logs and exposes a small
+# chat web UI (FastAPI + WebSocket) that answers threat-hunting questions using
+# retrieval-augmented generation over those logs.
+#
+
+import argparse
+import gzip
+import hashlib
+import json
+import logging
+import os
+import secrets
+import sys
+import threading
+from datetime import datetime, timedelta
+
+# --- Configuration (templated by Ansible) ------------------------------------
+OLLAMA_BASE_URL = "{{ ollama_api_url }}"
+OLLAMA_MODEL = "{{ threat_hunter_model }}"
+EMBEDDING_MODEL = "{{ threat_hunter_embedding_model }}"
+ARCHIVES_DIR = "{{ threat_hunter_archives_dir }}"
+DEFAULT_DAYS = {{ threat_hunter_default_days }}
+LISTEN_HOST = "{{ threat_hunter_listen_host }}"
+LISTEN_PORT = {{ threat_hunter_listen_port }}
+BASIC_AUTH_USER = "{{ threat_hunter_user }}"
+BASIC_AUTH_PASSWORD = "{{ threat_hunter_password }}"
+LOG_FILE = "{{ threat_hunter_log_file }}"
+# Number of log chunks the retriever feeds the model per question (default 4).
+RETRIEVAL_K = {{ threat_hunter_retrieval_k | default(20) }}
+# Where embedded FAISS indexes for rotated (immutable) archive files are cached,
+# so they are not re-embedded on every restart.
+INDEX_CACHE_DIR = "{{ threat_hunter_home }}/faiss_cache"
+# -----------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
+log = logging.getLogger("threat_hunter")
+
+# Heavy imports are deferred until after argument parsing so that --help and
+# daemonization stay fast.
+ChatOllama = None
+HuggingFaceEmbeddings = None
+FAISS = None
+RecursiveCharacterTextSplitter = None
+Document = None
+ConversationalRetrievalChain = None
+
+
+PromptTemplate = None
+
+
+def _import_ml_stack():
+    global ChatOllama, HuggingFaceEmbeddings, FAISS
+    global RecursiveCharacterTextSplitter, Document, ConversationalRetrievalChain
+    global PromptTemplate
+    from langchain_ollama import ChatOllama as _ChatOllama
+    from langchain_huggingface import HuggingFaceEmbeddings as _HFEmb
+    from langchain_community.vectorstores import FAISS as _FAISS
+    from langchain.text_splitter import RecursiveCharacterTextSplitter as _Splitter
+    from langchain_core.documents import Document as _Document
+    from langchain.chains import ConversationalRetrievalChain as _Chain
+    from langchain_core.prompts import PromptTemplate as _PromptTemplate
+
+    ChatOllama = _ChatOllama
+    HuggingFaceEmbeddings = _HFEmb
+    FAISS = _FAISS
+    RecursiveCharacterTextSplitter = _Splitter
+    Document = _Document
+    ConversationalRetrievalChain = _Chain
+    PromptTemplate = _PromptTemplate
+
+
+# --- Log ingestion -----------------------------------------------------------
+def iter_archive_paths(past_days=DEFAULT_DAYS):
+    """Yield (path, open_func, cacheable) for each archive to load.
+
+    Uses Wazuh's dated archive layout (matching the reference implementation):
+        {ARCHIVES_DIR}/{year}/{Mon}/ossec-archive-{DD}.json   (or .json.gz)
+    For each day back from today it prefers the plain .json file, falling back
+    to the rotated .gz. The LIVE {ARCHIVES_DIR}/archives.json holds the current
+    day's events that Wazuh has not rotated yet - without it, anything that
+    happened today would be invisible. Wazuh archives store all events, whether
+    or not they trigger a rule, which makes them ideal for threat hunting.
+
+    cacheable is True for rotated dated files (immutable once written, so their
+    embeddings can be cached) and False for the live archives.json (still
+    growing, so it must be re-read every time).
+    """
+    # Live current-day archive - changes constantly, never cached.
+    live_path = os.path.join(ARCHIVES_DIR, "archives.json")
+    if os.path.exists(live_path) and os.path.getsize(live_path) > 0:
+        yield live_path, open, False
+
+    today = datetime.now()
+    for i in range(past_days):
+        day = today - timedelta(days=i)
+        json_path = os.path.join(ARCHIVES_DIR, str(day.year), day.strftime("%b"),
+                                 f"ossec-archive-{day.strftime('%d')}.json")
+        gz_path = json_path + ".gz"
+
+        if os.path.exists(json_path) and os.path.getsize(json_path) > 0:
+            yield json_path, open, True
+        elif os.path.exists(gz_path) and os.path.getsize(gz_path) > 0:
+            yield gz_path, gzip.open, True
+        else:
+            log.warning("Log file missing or empty: %s / %s", json_path, gz_path)
+
+
+def read_log_file(file_path, open_func):
+    """Parse one archive file into a list of event dicts."""
+    logs = []
+    try:
+        with open_func(file_path, "rt", encoding="utf-8", errors="ignore") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    logs.append(json.loads(line))
+                except json.JSONDecodeError:
+                    log.warning("Skipping invalid JSON line in %s", file_path)
+    except OSError as exc:
+        log.warning("Error reading %s: %s", file_path, exc)
+    return logs
+
+
+def load_logs_from_days(past_days=DEFAULT_DAYS):
+    """Read all archive events for the past N days (used by /stat)."""
+    logs = []
+    for path, open_func, _cacheable in iter_archive_paths(past_days):
+        logs.extend(read_log_file(path, open_func))
+    return logs
+
+
+# --- Vector store ------------------------------------------------------------
+def event_to_text(entry):
+    """Render one Wazuh archive event as a compact, human-readable line.
+
+    Archives (logall_json) capture every event, most of which never match a
+    rule, so the gold field for retrieval is ``full_log`` (the raw log line,
+    e.g. "Failed password for invalid user admin from 1.2.3.4"). Embedding
+    that plus the few fields an analyst actually searches on gives far better
+    semantic matches than dumping the whole JSON blob (which buries the signal
+    under decoder/predecoder/manager boilerplate). Falls back to raw JSON only
+    when an event has none of the known fields.
+    """
+    parts = []
+    if entry.get("timestamp"):
+        parts.append("time={}".format(entry["timestamp"]))
+    agent = entry.get("agent") or {}
+    if agent.get("name"):
+        parts.append("agent={}".format(agent["name"]))
+    if entry.get("location"):
+        parts.append("source={}".format(entry["location"]))
+    decoder = entry.get("decoder") or {}
+    if decoder.get("name"):
+        parts.append("decoder={}".format(decoder["name"]))
+    rule = entry.get("rule") or {}
+    if rule.get("description"):
+        parts.append("rule={} (level {})".format(
+            rule["description"], rule.get("level")))
+    data = entry.get("data") or {}
+    for field in ("srcip", "srcuser", "dstuser", "srcport", "dstport"):
+        if data.get(field):
+            parts.append("{}={}".format(field, data[field]))
+    if entry.get("full_log"):
+        parts.append("log={}".format(entry["full_log"]))
+    if not parts:
+        return json.dumps(entry, ensure_ascii=False)
+    return " | ".join(parts)
+
+
+def logs_to_documents(logs):
+    """Turn log entries into Documents, one per event where possible.
+
+    Each event is kept whole so retrieval returns coherent log lines instead of
+    JSON fragments; only oversized events (long full_log) are split.
+    """
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    documents = []
+    for entry in logs:
+        text = event_to_text(entry)
+        if len(text) <= 1000:
+            documents.append(Document(page_content=text))
+        else:
+            for chunk in splitter.split_text(text):
+                documents.append(Document(page_content=chunk))
+    return documents
+
+
+def create_vectorstore(logs, embedding_model):
+    """Embed a list of log entries into a FAISS index (no caching)."""
+    documents = logs_to_documents(logs)
+    if not documents:
+        return None
+    return FAISS.from_documents(documents, embedding_model)
+
+
+def build_file_index(file_path, open_func, embeddings, cacheable):
+    """Return (FAISS index or None, log_count) for one archive file.
+
+    Immutable rotated files are embedded once and cached on disk keyed by
+    path+size; later starts load the cached index in seconds instead of
+    re-embedding. The live archives.json is always embedded fresh.
+    """
+    try:
+        size = os.path.getsize(file_path)
+    except OSError:
+        size = 0
+    cache_path = None
+    meta_path = None
+    if cacheable:
+        # The "v2" prefix is the document-schema version: bump it whenever
+        # event_to_text/logs_to_documents changes so stale caches (built with
+        # an older chunking scheme) are ignored instead of silently reused.
+        key = hashlib.sha1(f"v2:{file_path}:{size}".encode("utf-8")).hexdigest()
+        cache_path = os.path.join(INDEX_CACHE_DIR, key)
+        meta_path = cache_path + ".count"
+        if os.path.isdir(cache_path):
+            try:
+                index = FAISS.load_local(
+                    cache_path, embeddings, allow_dangerous_deserialization=True)
+                count = 0
+                try:
+                    with open(meta_path, "r", encoding="utf-8") as fh:
+                        count = int(fh.read().strip() or "0")
+                except (OSError, ValueError):
+                    pass
+                log.info("Loaded cached index for %s", os.path.basename(file_path))
+                return index, count
+            except Exception as exc:  # noqa: BLE001 - cache corruption is non-fatal
+                log.warning("Could not load cached index %s: %s", cache_path, exc)
+
+    logs = read_log_file(file_path, open_func)
+    documents = logs_to_documents(logs)
+    if not documents:
+        return None, len(logs)
+    index = FAISS.from_documents(documents, embeddings)
+    if cacheable and cache_path:
+        try:
+            index.save_local(cache_path)
+            with open(meta_path, "w", encoding="utf-8") as fh:
+                fh.write(str(len(logs)))
+        except Exception as exc:  # noqa: BLE001 - failing to cache is non-fatal
+            log.warning("Could not cache index %s: %s", cache_path, exc)
+    return index, len(logs)
+
+
+# --- Runtime state -----------------------------------------------------------
+class ThreatHunter:
+    def __init__(self):
+        self.embeddings = None
+        self.qa_chain = None
+        self.days = DEFAULT_DAYS
+        self.log_count = 0
+        self.last_loaded = None
+        self.warming = False
+        self._lock = threading.Lock()
+
+    def warm_up(self, days=None):
+        """Run initialize() in a background thread so the HTTP server stays
+        responsive. Returns False if a warm-up is already in progress."""
+        with self._lock:
+            if self.warming:
+                return False
+            self.warming = True
+
+        def _run():
+            try:
+                self.initialize(days=days)
+            except Exception:  # noqa: BLE001 - keep the server up on failure
+                log.exception("Index initialization failed")
+            finally:
+                self.warming = False
+
+        threading.Thread(target=_run, name="warmup", daemon=True).start()
+        return True
+
+    def initialize(self, days=None):
+        if days is not None:
+            self.days = days
+        if self.embeddings is None:
+            log.info("Loading embedding model %s ...", EMBEDDING_MODEL)
+            self.embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+
+        os.makedirs(INDEX_CACHE_DIR, exist_ok=True)
+
+        # Build/merge a FAISS index per archive file. Immutable rotated files
+        # come from the on-disk cache when available, so only today's live
+        # archive is re-embedded on a normal restart.
+        vectorstore = None
+        total_logs = 0
+        for path, open_func, cacheable in iter_archive_paths(self.days):
+            index, count = build_file_index(
+                path, open_func, self.embeddings, cacheable)
+            total_logs += count
+            if index is None:
+                continue
+            if vectorstore is None:
+                vectorstore = index
+            else:
+                vectorstore.merge_from(index)
+
+        self.log_count = total_logs
+        print(f"✅ {self.log_count} logs loaded from the last {self.days} days")
+
+        if vectorstore is None:
+            log.warning("No logs available - the assistant has no context yet.")
+            self.qa_chain = None
+            return
+
+        log.info("Connecting to Ollama at %s (model %s)", OLLAMA_BASE_URL, OLLAMA_MODEL)
+        # num_ctx is critical: Ollama defaults llama3 to a 2048-token context,
+        # which silently truncates the retrieved logs (k chunks) before the
+        # model sees them - the usual cause of "I don't know"/hallucinated
+        # answers. Size it to comfortably hold RETRIEVAL_K chunks plus the
+        # prompt. temperature=0 keeps answers grounded in the logs.
+        llm = ChatOllama(
+            model=OLLAMA_MODEL,
+            base_url=OLLAMA_BASE_URL,
+            temperature=0,
+            num_ctx=8192,
+        )
+        qa_prompt = PromptTemplate(
+            input_variables=["context", "question"],
+            template=(
+                "You are a security analyst doing threat hunting over Wazuh "
+                "archive logs. Each context line is one log event with fields "
+                "such as time, agent, source, decoder, rule and the raw log "
+                "line (log=...).\n\n"
+                "Answer the question using ONLY the log events below. Quote the "
+                "relevant raw log lines and note the agent/time when useful. If "
+                "the events below do not contain enough information to answer, "
+                "say exactly: \"I don't see evidence of that in the loaded "
+                "logs.\" Do not rely on general knowledge or invent details.\n\n"
+                "Log events:\n{context}\n\n"
+                "Question: {question}\n"
+                "Answer:"
+            ),
+        )
+        # Pull back more chunks per question (default is only 4) so the model
+        # can reason over a wider slice of the logs.
+        self.qa_chain = ConversationalRetrievalChain.from_llm(
+            llm=llm,
+            retriever=vectorstore.as_retriever(search_kwargs={"k": RETRIEVAL_K}),
+            return_source_documents=False,
+            combine_docs_chain_kwargs={"prompt": qa_prompt},
+        )
+        self.last_loaded = datetime.now()
+        log.info("Vector store ready.")
+
+    def ask(self, question, chat_history):
+        if self.qa_chain is None:
+            if self.warming:
+                return ("Still loading logs and building the index - this can take "
+                        "a few minutes on first start. Please wait and try again.")
+            return "No logs are loaded yet. Try '/set days <n>' then '/reload'."
+        result = self.qa_chain.invoke({"question": question, "chat_history": chat_history})
+        return result.get("answer", "(no answer)")
+
+    def stats(self):
+        loaded = self.last_loaded.isoformat() if self.last_loaded else "never"
+        status = "warming up (building index)" if self.warming else "ready"
+        return (
+            f"Status: {status}\n"
+            f"Logs loaded: {self.log_count}\n"
+            f"Time range: last {self.days} day(s)\n"
+            f"Last reload: {loaded}\n"
+            f"Ollama: {OLLAMA_MODEL} @ {OLLAMA_BASE_URL}"
+        )
+
+
+HELP_TEXT = (
+    "Available commands:\n"
+    "  /help              Show this help\n"
+    "  /reload            Rebuild the vector store for the current time range\n"
+    "  /set days <n>      Change the log range (1-365 days) and reload\n"
+    "  /stat              Show log statistics and the active time range\n"
+    "Anything else is treated as a threat-hunting question."
+)
+
+
+def handle_command(hunter, text):
+    """Return a response string for slash commands, or None if not a command."""
+    text = text.strip()
+    if not text.startswith("/"):
+        return None
+    parts = text.split()
+    cmd = parts[0].lower()
+    if cmd == "/help":
+        return HELP_TEXT
+    if cmd == "/stat":
+        return hunter.stats()
+    if cmd == "/reload":
+        if hunter.warm_up():
+            return "Reloading in the background. Use /stat to check progress."
+        return "A reload is already in progress. Use /stat to check progress."
+    if cmd == "/set" and len(parts) >= 3 and parts[1].lower() == "days":
+        try:
+            n = int(parts[2])
+        except ValueError:
+            return "Usage: /set days <number 1-365>"
+        if not 1 <= n <= 365:
+            return "Days must be between 1 and 365."
+        if hunter.warm_up(days=n):
+            return f"Range set to {n} day(s). Reloading in the background; use /stat."
+        return "A reload is already in progress. Use /stat to check progress."
+    return "Unknown command. Type /help."
+
+
+# --- Web app -----------------------------------------------------------------
+def build_app(hunter):
+    from fastapi import FastAPI, Depends, HTTPException, WebSocket, status
+    from fastapi.responses import HTMLResponse
+    from fastapi.security import HTTPBasic, HTTPBasicCredentials
+
+    app = FastAPI(title="Wazuh AI Threat Hunter")
+    security = HTTPBasic()
+
+    def check_auth(credentials: HTTPBasicCredentials = Depends(security)):
+        user_ok = secrets.compare_digest(credentials.username, BASIC_AUTH_USER)
+        pass_ok = secrets.compare_digest(credentials.password, BASIC_AUTH_PASSWORD)
+        if not (user_ok and pass_ok):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid credentials",
+                headers={"WWW-Authenticate": "Basic"},
+            )
+        return credentials.username
+
+    @app.get("/", response_class=HTMLResponse)
+    def index(_user: str = Depends(check_auth)):
+        return PAGE_HTML
+
+    @app.websocket("/ws/chat")
+    async def chat(websocket: WebSocket):
+        await websocket.accept()
+        chat_history = []
+        banner = "Connected to the Wazuh AI Threat Hunter. Type /help for commands."
+        if hunter.warming:
+            banner += "\n(Index is still warming up - answers will be available shortly.)"
+        await websocket.send_text(banner)
+        while True:
+            try:
+                question = await websocket.receive_text()
+            except Exception:
+                break
+            cmd_response = handle_command(hunter, question)
+            if cmd_response is not None:
+                await websocket.send_text(cmd_response)
+                continue
+            try:
+                answer = hunter.ask(question, chat_history)
+                chat_history.append((question, answer))
+                await websocket.send_text(answer)
+            except Exception as exc:  # noqa: BLE001
+                log.exception("Error answering question")
+                await websocket.send_text(f"Error: {exc}")
+
+    return app
+
+
+PAGE_HTML = """<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Wazuh AI Threat Hunter</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0d1117; color: #e6edf3; }
+  header { padding: 12px 16px; background: #161b22; border-bottom: 1px solid #30363d; }
+  #log { padding: 16px; height: calc(100vh - 140px); overflow-y: auto; }
+  .msg { margin: 8px 0; white-space: pre-wrap; }
+  .you { color: #58a6ff; }
+  .bot { color: #7ee787; }
+  form { display: flex; padding: 12px 16px; background: #161b22; border-top: 1px solid #30363d; }
+  input { flex: 1; padding: 10px; background: #0d1117; color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; }
+  button { margin-left: 8px; padding: 10px 16px; }
+</style>
+</head>
+<body>
+<header><strong>Wazuh AI Threat Hunter</strong> &mdash; ask about recent activity, or /help</header>
+<div id="log"></div>
+<form id="f">
+  <input id="q" autocomplete="off" placeholder="Ask a question or type /help" autofocus/>
+  <button>Send</button>
+</form>
+<script>
+  const logEl = document.getElementById('log');
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(proto + '://' + location.host + '/ws/chat');
+  function add(text, cls) {
+    const d = document.createElement('div');
+    d.className = 'msg ' + cls;
+    d.textContent = text;
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+  ws.onmessage = (e) => add(e.data, 'bot');
+  ws.onclose = () => add('[disconnected]', 'bot');
+  document.getElementById('f').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const q = document.getElementById('q');
+    if (!q.value.trim()) return;
+    add(q.value, 'you');
+    ws.send(q.value);
+    q.value = '';
+  });
+</script>
+</body>
+</html>"""
+
+
+def run_server(hunter):
+    import uvicorn
+
+    app = build_app(hunter)
+    # Build the index in the background so the web server is reachable
+    # immediately; the UI reports "warming up" until it is ready.
+    hunter.warm_up()
+    log.info("Serving on http://%s:%s", LISTEN_HOST, LISTEN_PORT)
+    uvicorn.run(app, host=LISTEN_HOST, port=LISTEN_PORT, log_level="info")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Wazuh AI threat-hunter (remote Ollama).")
+    parser.add_argument("-d", "--daemon", action="store_true", help="Run in the background.")
+    parser.add_argument(
+        "--days", type=int, default=DEFAULT_DAYS,
+        help="Number of days of archives to load on startup.",
+    )
+    args = parser.parse_args()
+
+    _import_ml_stack()
+    hunter = ThreatHunter()
+    hunter.days = args.days
+
+    if args.daemon:
+        import daemon
+
+        log.info("Daemonizing; logs go to %s", LOG_FILE)
+        with open(LOG_FILE, "a") as logfh:
+            with daemon.DaemonContext(stdout=logfh, stderr=logfh):
+                run_server(hunter)
+    else:
+        run_server(hunter)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
