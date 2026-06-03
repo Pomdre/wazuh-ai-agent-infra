@@ -3,3 +3,7 @@ ansible_host: 158.37.65.241
 ansible_user: freebsd
 hostname: c-freebsd
 vault_env: staging
+
+# firewall interfaces
+firewall_extdev: 'vtnet0'
+firewall_intdev: 'lo0'
